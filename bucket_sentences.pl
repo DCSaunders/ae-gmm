@@ -6,7 +6,7 @@ sub anon_fh {
    return *FH;
 }
 
-my $f_name = "/home/mifs/ds636/exps/data/wmt.en.14/test.idx";
+my $f_name = $ARGV[0];
 my @buckets = (11, 21, 31, 41, 51);
 open(my $in, "<", $f_name) 
     or die "$f_name not openable";
@@ -26,7 +26,7 @@ while (<$in>)
     chomp;
     my $unsplit = $_;
     my @line = split(' ', $unsplit);
-    if (@line < 51) {
+    if (@line < $buckets[-1]) {
 	foreach $b (@buckets)
 	{
 	    if (@line < $b) {
