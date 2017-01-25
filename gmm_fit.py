@@ -10,7 +10,6 @@ from mpl_toolkits.mplot3d import Axes3D
 import cPickle
 from sklearn import mixture
 from scipy.stats import multivariate_normal
-from tsne import tsne
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -31,12 +30,15 @@ def get_args():
                         help='Location to save labelled training samples')
     parser.add_argument('--plot', action='store_true', default=False,
                         help='Project samples/model into two dimensions using TSNE, and save a plot')
-    parser.add_argument('--pickled_in', action='store_true', default=False,
-                        help='If true, input vectors must be unpickled')
     parser.add_argument('--n_components', type=int, default=0,
                         help='Number of GMM components to fit')
     parser.add_argument('--full_covar', action='store_true', default=False,
                         help='Set if Gaussians have full, not diagonal, covariance')
+    parser.add_argument('--uneven', action='store_true', default=False,
+                        help='Set if interpolating with uneven intervals')
+    parser.add_argument('--random', action='store_true', default=False,
+                        help='Set if interpolating between real and random samples')
+
     parser.add_argument('--max_in', type=int, default=0, help='Max number of training inputs - uses all if 0')
     parser.add_argument('--samples_per_mode', type=int, default=100, help='Average number of training samples per GMM mode')
     parser.add_argument('--interpolate',
@@ -90,31 +92,28 @@ def get_samples(args):
             print 'Loaded {} pickled samples from {}'.format(
                 len(samples), args.load_input)
     else:
-        if args.pickled_in:
-            samples = []
-            lengths = []
-            with open(args.file_in, 'rb') as f:
-                unpickler = cPickle.Unpickler(f)
-                while True:
-                    try:
-                        saved = unpickler.load()
-                        if args.load_lengths:
-                            sample = np.array(saved['states'][0][0], dtype=float)
-                            samples.append(sample)
-                            lengths.append(saved['length'])
-                        else:
-                            samples.append(np.array(saved)[0])
-                        if args.max_in and len(samples) >= args.max_in:
-                            break
-                    except (EOFError):
+        samples = []
+        lengths = []
+        with open(args.file_in, 'rb') as f:
+            unpickler = cPickle.Unpickler(f)
+            while True:
+                try:
+                    saved = unpickler.load()
+                    if args.load_lengths:
+                        sample = np.array(saved['states'][0][0], dtype=float)
+                        samples.append(sample)
+                        lengths.append(saved['length'])
+                    else:
+                        samples.append(np.array(saved)[0])
+                    if args.max_in and len(samples) >= args.max_in:
                         break
-                print 'Unpickled {} samples from {}'.format(
-                    len(samples), args.file_in)
-        else:
-            samples = np.loadtxt(args.file_in)
-            print 'Loaded samples file from {}'.format(args.file_in)
+                except (EOFError):
+                    break
+            print 'Unpickled {} samples from {}'.format(
+                len(samples), args.file_in)
     if args.plot:
         if not proj_samples:
+            from tsne import tsne
             proj_samples = tsne(samples, max_iter=200)
         plot_samples(proj_samples)
     return samples, proj_samples, lengths
@@ -153,33 +152,53 @@ def sample_model(gmm, n_samples):
         label_samples.append({'states': sample, 'label': label, 'score': score})
     return label_samples
 
-def predict_model(gmm, samples, save_labels, interpolate, label_samples, interpolate_count=6):
+def predict_model(gmm, samples, save_labels, interpolate, label_samples, interpolate_count=6, uneven_interpolation=False, random_sample=False):
     labels = gmm.predict(samples)
     if save_labels:
         with open(save_labels, 'wb') as f:
             cPickle.dump(zip(samples, labels), f)
     if interpolate:
-        do_interpolate(zip(labels, samples), label_samples, interpolate, interpolate_count)
+        do_interpolate(zip(labels, samples), label_samples, interpolate, interpolate_count, uneven_interpolation, random_sample)
       
 
-def do_interpolate(train_labels_samples, label_samples, interp_file, interpolate_count):
+def do_interpolate(train_labels_samples, label_samples, interp_file, interpolate_count, uneven, sample_random):
     label_interps_dict = collections.defaultdict(list)
     sampled_labels = collections.defaultdict(list)
+    train_labels = collections.defaultdict(list)
+
     for entry in label_samples:
         sampled_labels[entry['label']].append(entry['states'])
+    for entry in train_labels_samples:
+        train_labels[entry[0]].append(entry[1])
+
     for k, v in sampled_labels.items():
         print k, len(v)
-    for label, train_sample in train_labels_samples:
-        if sampled_labels[label]:
-            interpolations = [train_sample]
-            rand_sample = sampled_labels[label].pop()
-            increment = (rand_sample - train_sample) / interpolate_count 
-            for interp_num in range(0, interpolate_count):
-                interpolations.append(interpolations[interp_num] + increment)
+    for label in train_labels:
+        if ((sampled_labels[label] and train_labels[label])or 
+            (not sample_random and len(train_labels[label]) >= 2)):
+            interpolations = [train_labels[label].pop()]
+            if sample_random:
+                endpoint = sampled_labels[label].pop()
+            else:
+                endpoint = train_labels[label].pop()
+            if uneven:
+                uneven_interpolation(interpolations, endpoint)
+            else:
+                even_interpolations(interpolations, endpoint, interpolate_count)
             label_interps_dict[label].append(interpolations)
     with open(interp_file, 'wb') as f:
         cPickle.dump(label_interps_dict, f)
 
+def uneven_interpolation(interpolations, endpoint):
+    diff = endpoint - interpolations[0]
+    for incr in [0.1, 0.2, 0.4, 0.6, 0.8, 1.0]:
+        interpolations.append(interpolations[0] + incr * diff)
+
+
+def even_interpolation(interpolations, endpoint, interpolate_count):
+    increment = (endpoint - interpolations[0]) / interpolate_count 
+    for interp_num in range(0, interpolate_count):
+        interpolations.append(interpolations[interp_num] + increment)
 
 if __name__ == '__main__':
     args = get_args()
@@ -193,5 +212,8 @@ if __name__ == '__main__':
     label_samples = sample_model(gmm, n_samples)
     if args.save_labels or args.interpolate:
         predict_model(gmm, train_samples[:n_train_samples],
-                      args.save_labels, args.interpolate, label_samples, interpolate_count=n_interpolate)
+                      args.save_labels, args.interpolate, 
+                      label_samples, interpolate_count=n_interpolate,
+                      uneven_interpolation=args.uneven, 
+                      random_sample=args.random)
     save_model(args, gmm, train_samples, proj_samples, label_samples)
